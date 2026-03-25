@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batuc-trainer-deployment
+  labels:
+    app: batuc-trainer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: batuc-trainer
+  template:
+    metadata:
+      labels:
+        app: batuc-trainer
+    spec:
+      containers:
+      - name: batuc-trainer
+        image: avouacr/batuc-trainer:0.0.1
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi

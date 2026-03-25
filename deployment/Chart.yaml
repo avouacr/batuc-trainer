@@ -1,7 +1,0 @@
-apiVersion: v2
-name: batuc-trainer
-version: 0.0.1
-dependencies:
-  - name: shiny
-    version: 1.1.1
-    repository: https://inseefrlab.github.io/helm-charts

@@ -1,0 +1,20 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: batuc-trainer-ingress
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - batuc-trainer.lab.sspcloud.fr
+  rules:
+  - host: batuc-trainer.lab.sspcloud.fr
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: batuc-trainer-service
+            port:
+              number: 80
