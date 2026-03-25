@@ -16,12 +16,7 @@ const LOOKAHEAD_SEC = 0.1;
 const HISTORY_SIZE = 16;
 const MATCH_WINDOW_SEC = 0.5;
 
-const CAL_STEPS    = ['loud_accent', 'low_tap'];
-const CAL_HITS_NEEDED = 3;
-
-const CAL_DELAY_BPM   = 80;
-const CAL_DELAY_BEATS = 8;
-// True-peak defaults (with 3× input gain). Calibrate for your setup.
+// True-peak defaults (with 3× input gain).
 const DEFAULT_CAL  = { loud_accent: 0.8, accent: 0.5, tap: 0.22, low_tap: 0.07 };
 
 const LS_CAL     = 'snare-trainer-cal';
@@ -42,9 +37,9 @@ let nextBeatIndex = 0;
 
 let expectedBeats = [];
 let hitHistory    = [];
+let hitsSinceCorrection = 0;
 
-let cal      = loadCalibration();
-let calState = null;
+let cal = loadCalibration();
 
 const _storedLatency = parseInt(localStorage.getItem(LS_LATENCY), 10);
 let latencyOffsetMs = (!isNaN(_storedLatency) && _storedLatency > 0) ? _storedLatency : 200;
@@ -98,10 +93,7 @@ async function initAudio() {
     const auto = Math.round(
       ((audioCtx.outputLatency || 0) + (audioCtx.baseLatency || 0)) * 1000
     );
-    if (auto > 0) {
-      latencyOffsetMs = auto;
-      document.getElementById('latency-display').textContent = `${auto}ms`;
-    }
+    if (auto > 0) latencyOffsetMs = auto;
   }
 }
 
@@ -114,10 +106,7 @@ async function startMic() {
   inputGainNode.gain.value = 3;
   onsetNode = new AudioWorkletNode(audioCtx, 'onset-processor');
   onsetNode.port.onmessage = (e) => {
-    if (e.data.type === 'onset') {
-      updateVelocityMeter(e.data.peak);
-      processOnset(e.data);
-    }
+    if (e.data.type === 'onset') processOnset(e.data);
   };
   micSource.connect(inputGainNode);
   inputGainNode.connect(onsetNode);
@@ -187,6 +176,7 @@ function startMetronome() {
   nextBeatTime  = audioCtx.currentTime + 0.1;
   expectedBeats = [];
   hitHistory    = [];
+  hitsSinceCorrection = 0;
   renderFeedback();
   renderPatternStrip();
   schedulerTimer = setInterval(schedulerTick, SCHEDULE_INTERVAL_MS);
@@ -233,10 +223,6 @@ function schedulerTick() {
 
 function processOnset({ time, peak }) {
   const detectedDynamic = peakToDynamic(peak);
-  if (calState !== null) {
-    if (calState.phase === 'delay') { handleDelayCalOnset(time); return; }
-    handleCalOnset(peak); return;
-  }
   if (!isRunning) return;
 
   let best = null, bestDist = Infinity;
@@ -256,93 +242,26 @@ function processOnset({ time, peak }) {
     matched:  best !== null,
   });
   if (hitHistory.length > HISTORY_SIZE) hitHistory.shift();
+
+  if (best && timingMs !== null) {
+    hitsSinceCorrection++;
+    if (hitsSinceCorrection >= HISTORY_SIZE) {
+      autoCorrectLatency();
+      hitsSinceCorrection = 0;
+    }
+  }
+
   renderFeedback();
 }
 
-// ─── Calibration ─────────────────────────────────────────────────────────────
-
-function startCalibration() {
-  if (isRunning) stopMetronome();
-  if (!onsetNode) return;
-  calState = { phase: 'delay', started: false, beats: [], taps: [] };
-  scheduleDelayCalBeats();
-  renderDelayCalPrompt();
-}
-
-function scheduleDelayCalBeats() {
-  const beatDur = 60 / CAL_DELAY_BPM;
-  let t = audioCtx.currentTime + 0.5;
-  // Schedule extra beats so the user has time to find the rhythm before the count starts
-  for (let i = 0; i < CAL_DELAY_BEATS * 3; i++) {
-    const nodes = scheduleSnareHit(t, 'accent');
-    calState.beats.push({ time: t, matched: false, nodes });
-    t += beatDur;
-  }
-  // No timeout — finalization is triggered by collecting CAL_DELAY_BEATS taps
-}
-
-function handleDelayCalOnset(time) {
-  if (!calState.started) {
-    calState.started = true;
-    renderDelayCalActive();
-  }
-  let best = null, bestDist = Infinity;
-  for (const b of calState.beats) {
-    if (b.matched) continue;
-    const dist = Math.abs(time - b.time);
-    if (dist < bestDist && dist < 0.5) { bestDist = dist; best = b; }
-  }
-  if (best) {
-    best.matched = true;
-    calState.taps.push(time - best.time);
-    updateDelayCalProgress();
-    if (calState.taps.length >= CAL_DELAY_BEATS) finalizeDelayCalibration();
-  }
-}
-
-function finalizeDelayCalibration() {
-  if (!calState || calState.phase !== 'delay') return;
-  // Stop any beats that haven't played yet
-  const now = audioCtx.currentTime;
-  for (const b of calState.beats) {
-    if (b.time > now) {
-      for (const node of b.nodes) { try { node.stop(now); } catch (_) {} }
-    }
-  }
-  const taps = calState.taps;
-  if (taps.length >= 3) {
-    const sorted = [...taps].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    latencyOffsetMs = Math.max(0, Math.min(500, Math.round(median * 1000)));
-    document.getElementById('latency-display').textContent = `${latencyOffsetMs}ms`;
-    localStorage.setItem(LS_LATENCY, String(latencyOffsetMs));
-  }
-  calState = { phase: 'strength', step: 0, readings: [] };
-  renderCalPrompt();
-}
-
-function handleCalOnset(peak) {
-  calState.readings.push(peak);
-  updateCalProgress();
-  if (calState.readings.length >= CAL_HITS_NEEDED) {
-    const sorted = [...calState.readings].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    cal[CAL_STEPS[calState.step]] = median;
-
-    calState.step++;
-    calState.readings = [];
-    if (calState.step >= CAL_STEPS.length) {
-      // Derive the two intermediate levels from the calibrated endpoints
-      const range = cal.loud_accent - cal.low_tap;
-      cal.accent = cal.low_tap + range * (2 / 3);
-      cal.tap    = cal.low_tap + range * (1 / 3);
-      calState = null;
-      saveCalibration();
-      renderCalDone();
-    } else {
-      renderCalPrompt();
-    }
-  }
+function autoCorrectLatency() {
+  const matched = hitHistory.filter(h => h.matched && h.timingMs !== null);
+  if (matched.length < 8) return;
+  const sorted = matched.map(h => h.timingMs).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  if (Math.abs(median) < 5) return;  // ignore negligible bias
+  latencyOffsetMs = Math.max(0, Math.min(500, latencyOffsetMs + median));
+  localStorage.setItem(LS_LATENCY, String(latencyOffsetMs));
 }
 
 // ─── Render: pattern strip ────────────────────────────────────────────────────
@@ -430,138 +349,51 @@ function renderPatternStrip() {
 // ─── Render: feedback panels ──────────────────────────────────────────────────
 
 function renderFeedback() {
-  renderPerfCanvas();
+  renderTimingPanel();
 }
 
-function renderPerfCanvas() {
-  const canvas = document.getElementById('perf-canvas');
-  if (!canvas) return;
-  const W = canvas.offsetWidth;
-  const H = canvas.offsetHeight;
-  if (W === 0 || H === 0) return;
-
-  // Setting width/height clears the canvas and matches its intrinsic size to CSS size
-  canvas.width  = W;
-  canvas.height = H;
-  const ctx = canvas.getContext('2d');
-
-  const MAX_MS  = 200;   // ±200 ms timing range
-  const MAX_DYN = 3;     // ±3 ordinal dynamic levels
-
-  const padX = 36, padY = 20;
-  const plotW = W - 2 * padX;
-  const plotH = H - 2 * padY;
-  const cx = padX + plotW / 2;
-  const cy = padY + plotH / 2;
-
-  // Map timing error (ms) to canvas x
-  const toX = ms  => padX + (Math.max(-MAX_MS, Math.min(MAX_MS, ms))  / MAX_MS  + 1) / 2 * plotW;
-  // Map dynamic ordinal error to canvas y (positive = too loud = top)
-  const toY = err => padY + (-Math.max(-MAX_DYN, Math.min(MAX_DYN, err)) / MAX_DYN + 1) / 2 * plotH;
-
-  // Bullseye rings
-  ctx.lineWidth = 1;
-  for (const r of [0.33, 0.66, 1.0]) {
-    ctx.strokeStyle = r === 0.33 ? '#2a3a2a' : '#252525';
-    ctx.beginPath();
-    ctx.ellipse(cx, cy, plotW / 2 * r, plotH / 2 * r, 0, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  // Crosshair
-  ctx.strokeStyle = '#333';
-  ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(padX, cy); ctx.lineTo(W - padX, cy); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx, padY); ctx.lineTo(cx, H - padY); ctx.stroke();
-
-  // Axis labels
-  ctx.font = '11px monospace';
-  ctx.fillStyle = '#888';
-  ctx.textAlign = 'left';  ctx.fillText('early', padX + 3, cy - 4);
-  ctx.textAlign = 'right'; ctx.fillText('late',  W - padX - 3, cy - 4);
-  ctx.textAlign = 'center';
-  ctx.fillText('loud', cx, padY + 10);
-  ctx.fillText('soft', cx, H - padY - 4);
-
-  // Hits
-  const hits = hitHistory.filter(h => h.matched && h.timingMs !== null && h.expected);
-  if (hits.length === 0) {
-    ctx.fillStyle = '#444';
-    ctx.font = '11px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('Play to see feedback', cx, cy + 4);
+function renderTimingPanel() {
+  const container = document.getElementById('timing-bars');
+  container.innerHTML = '';
+  const matched = hitHistory.filter(h => h.matched && h.timingMs !== null);
+  if (matched.length === 0) {
+    container.innerHTML = '<span class="placeholder">Play to see timing feedback</span>';
     return;
   }
+  const maxMs = 200;
+  matched.forEach((hit, idx) => {
+    const opacity  = 0.25 + 0.75 * (idx + 1) / matched.length;
+    const pct      = Math.max(-1, Math.min(1, hit.timingMs / maxMs));
+    const xPct     = ((pct + 1) / 2) * 100;
+    let colorClass = 'hit-red';
+    if (Math.abs(hit.timingMs) <= TIMING_GREEN_MS)  colorClass = 'hit-green';
+    else if (Math.abs(hit.timingMs) <= TIMING_YELLOW_MS) colorClass = 'hit-yellow';
 
-  hits.forEach((hit, idx) => {
-    const opacity  = 0.2 + 0.8 * (idx + 1) / hits.length;
-    const dynErr   = dynamicOrdinal(hit.detected) - dynamicOrdinal(hit.expected);
-    const x = toX(hit.timingMs);
-    const y = toY(dynErr);
+    const row   = document.createElement('div');
+    row.className = 'timing-row';
+    row.style.opacity = opacity;
 
-    const timingOk    = Math.abs(hit.timingMs) <= TIMING_GREEN_MS;
-    const timingClose = Math.abs(hit.timingMs) <= TIMING_YELLOW_MS;
-    const dynOk       = dynErr === 0;
-    const dynClose    = Math.abs(dynErr) <= 1;
+    const track  = document.createElement('div');
+    track.className = 'timing-track';
 
-    let [r, g, b] =
-      (timingOk    && dynOk)    ? [48, 209, 88]   :  // green
-      (timingClose && dynClose) ? [255, 214, 10]   :  // yellow
-                                  [255, 69, 58];       // red
+    const center = document.createElement('div');
+    center.className = 'timing-center';
+    track.appendChild(center);
 
-    ctx.beginPath();
-    ctx.arc(x, y, 5, 0, Math.PI * 2);
-    ctx.fillStyle = `rgba(${r},${g},${b},${opacity})`;
-    ctx.fill();
+    const dot = document.createElement('div');
+    dot.className = `timing-dot ${colorClass}`;
+    dot.style.left = `${xPct}%`;
+    dot.title = `${hit.timingMs > 0 ? '+' : ''}${hit.timingMs}ms`;
+    track.appendChild(dot);
+
+    const label = document.createElement('span');
+    label.className = `timing-label ${colorClass}`;
+    label.textContent = `${hit.timingMs > 0 ? '+' : ''}${hit.timingMs}ms`;
+
+    row.appendChild(track);
+    row.appendChild(label);
+    container.appendChild(row);
   });
-}
-
-// ─── Render: calibration ──────────────────────────────────────────────────────
-
-function renderDelayCalPrompt() {
-  const el = document.getElementById('cal-status');
-  el.textContent = `Delay calibration: beats are playing — start tapping when ready…`;
-  el.className   = 'cal-active';
-  document.getElementById('cal-progress').textContent = '';
-}
-
-function renderDelayCalActive() {
-  document.getElementById('cal-status').textContent =
-    `Delay calibration: keep tapping (${CAL_DELAY_BEATS} beats at ${CAL_DELAY_BPM} BPM)…`;
-  document.getElementById('cal-progress').textContent = `0 / ${CAL_DELAY_BEATS}`;
-}
-
-function updateDelayCalProgress() {
-  document.getElementById('cal-progress').textContent =
-    `${calState.taps.length} / ${CAL_DELAY_BEATS}`;
-}
-
-function renderCalPrompt() {
-  const dyn = CAL_STEPS[calState.step];
-  const el  = document.getElementById('cal-status');
-  el.textContent = `Stroke calibration ${calState.step + 1}/${CAL_STEPS.length}: hit "${dyn.replace('_', ' ')}" (${DYNAMIC_LABELS[dyn]}) — ${CAL_HITS_NEEDED}×`;
-  el.className   = 'cal-active';
-  document.getElementById('cal-progress').textContent = '';
-}
-
-function updateCalProgress() {
-  document.getElementById('cal-progress').textContent =
-    `${calState.readings.length} / ${CAL_HITS_NEEDED}`;
-}
-
-function renderCalDone() {
-  const el = document.getElementById('cal-status');
-  el.textContent = '';
-  el.className   = '';
-  document.getElementById('cal-progress').textContent = '';
-}
-
-// ─── Render: velocity meter ───────────────────────────────────────────────────
-
-function updateVelocityMeter(peak) {
-  // True peak is 0–1 (clipping = 1.0). Show as percentage with a bit of headroom.
-  document.getElementById('vel-fill').style.height = `${Math.min(100, peak * 110)}%`;
-  document.getElementById('vel-label').textContent  = DYNAMIC_LABELS[peakToDynamic(peak)];
 }
 
 // ─── Render: play button ──────────────────────────────────────────────────────
@@ -617,19 +449,10 @@ async function onPlayStop() {
   updatePlayButton();
 }
 
-async function onCalibrate() {
-  if (!audioCtx) { await initAudio(); await startMic(); }
-  if (audioCtx.state === 'suspended') await audioCtx.resume();
-  startCalibration();
-}
-
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
-  document.getElementById('latency-display').textContent = `${latencyOffsetMs}ms`;
-
   document.getElementById('btn-play').addEventListener('click', onPlayStop);
-  document.getElementById('btn-calibrate').addEventListener('click', onCalibrate);
   document.getElementById('pattern-select').addEventListener('change', () => {
     loadPattern(document.getElementById('pattern-select').value);
   });

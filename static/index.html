@@ -26,17 +26,7 @@
       </div>
 
       <button id="btn-play" class="btn-primary">Start</button>
-
-      <button id="btn-calibrate" class="btn-secondary">Calibrate</button>
-
-      <div class="control-group">
-        <label>Latency offset <span id="latency-display">200ms</span></label>
-      </div>
     </section>
-
-    <!-- Calibration status -->
-    <div id="cal-status"></div>
-    <div id="cal-progress"></div>
 
     <!-- Pattern strip -->
     <section class="panel">
@@ -44,18 +34,15 @@
       <div id="pattern-strip" class="pattern-strip"></div>
     </section>
 
-    <!-- Performance panel -->
+    <!-- Timing panel -->
     <section class="panel">
-      <h2>Performance</h2>
-      <div class="perf-row">
-        <canvas id="perf-canvas" class="perf-canvas"></canvas>
-        <div class="vel-meter">
-          <div class="vel-track">
-            <div id="vel-fill" class="vel-fill"></div>
-          </div>
-          <div id="vel-label" class="vel-label">—</div>
-        </div>
+      <h2>Timing</h2>
+      <div class="timing-legend">
+        <span>early</span>
+        <span>on time</span>
+        <span>late</span>
       </div>
+      <div id="timing-bars" class="timing-bars"></div>
     </section>
 
   </main>
